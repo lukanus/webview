@@ -107,7 +107,8 @@ struct webview {
 enum webview_dialog_type {
   WEBVIEW_DIALOG_TYPE_OPEN = 0,
   WEBVIEW_DIALOG_TYPE_SAVE = 1,
-  WEBVIEW_DIALOG_TYPE_ALERT = 2
+  WEBVIEW_DIALOG_TYPE_ALERT = 2,
+  WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE = 3
 };
 
 #define WEBVIEW_DIALOG_FLAG_FILE (0 << 0)
@@ -373,27 +374,48 @@ WEBVIEW_API void webview_dialog(struct webview *w,
     result[0] = '\0';
   }
   if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN ||
+     dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE ||
       dlgtype == WEBVIEW_DIALOG_TYPE_SAVE) {
     dlg = gtk_file_chooser_dialog_new(
         title, GTK_WINDOW(w->priv.window),
-        (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN
+        (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN || dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE
              ? (flags & WEBVIEW_DIALOG_FLAG_DIRECTORY
                     ? GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER
                     : GTK_FILE_CHOOSER_ACTION_OPEN)
              : GTK_FILE_CHOOSER_ACTION_SAVE),
         "_Cancel", GTK_RESPONSE_CANCEL,
-        (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN ? "_Open" : "_Save"),
+        ( (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN || dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE) ? "_Open" : "_Save"),
         GTK_RESPONSE_ACCEPT, NULL);
     gtk_file_chooser_set_local_only(GTK_FILE_CHOOSER(dlg), FALSE);
-    gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dlg), FALSE);
+    
+    if ( dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE ) {
+      gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dlg), TRUE);
+    } else {
+      gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dlg), FALSE);
+    }
     gtk_file_chooser_set_show_hidden(GTK_FILE_CHOOSER(dlg), TRUE);
     gtk_file_chooser_set_do_overwrite_confirmation(GTK_FILE_CHOOSER(dlg), TRUE);
     gtk_file_chooser_set_create_folders(GTK_FILE_CHOOSER(dlg), TRUE);
     gint response = gtk_dialog_run(GTK_DIALOG(dlg));
     if (response == GTK_RESPONSE_ACCEPT) {
-      gchar *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
-      g_strlcpy(result, filename, resultsz);
-      g_free(filename);
+      if ( dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE ) {
+        GSList *filenames = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(dlg));
+        GSList *iterator = NULL;
+        GString *strfilenames = g_string_new("");
+        for(iterator = filenames; iterator; iterator = iterator->next) {
+          if (g_slist_position(filenames,iterator) > 0) {
+            g_string_append(strfilenames, "|");
+          } 
+            g_string_append(strfilenames, iterator->data);
+        }
+        g_strlcpy(result, strfilenames->str, resultsz);
+        g_slist_free(filenames); g_slist_free(iterator);
+        g_free(strfilenames);
+      } else {
+        gchar *filename = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dlg));
+        g_strlcpy(result, filename, resultsz);
+        g_free(filename);
+      }
     }
     gtk_widget_destroy(dlg);
   } else if (dlgtype == WEBVIEW_DIALOG_TYPE_ALERT) {
@@ -1455,8 +1477,8 @@ typedef struct IFileDialogVtbl {
   HRESULT(STDMETHODCALLTYPE *Close)(IFileDialog *This, HRESULT hr);
   HRESULT(STDMETHODCALLTYPE *SetClientGuid)(IFileDialog *This, REFGUID guid);
   HRESULT(STDMETHODCALLTYPE *ClearClientData)(IFileDialog *This);
-  HRESULT(STDMETHODCALLTYPE *SetFilter)
-  (IFileDialog *This, IShellItemFilter *pFilter);
+  HRESULT(STDMETHODCALLTYPE *SetFilter)(IFileDialog *This, IShellItemFilter *pFilter);
+  HRESULT(STDMETHODCALLTYPE *GetResults)(IFileDialog *This, IShellItemArray **ppsi);
   END_INTERFACE
 } IFileDialogVtbl;
 interface IFileDialog {
@@ -1468,18 +1490,20 @@ DEFINE_GUID(IID_IFileSaveDialog, 0x84bccd23, 0x5fde, 0x4cdb, 0xae, 0xa4, 0xaf,
             0x64, 0xb8, 0x3d, 0x78, 0xab);
 #endif
 
+
 WEBVIEW_API void webview_dialog(struct webview *w,
                                 enum webview_dialog_type dlgtype, int flags,
                                 const char *title, const char *arg,
                                 char *result, size_t resultsz) {
-  if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN ||
+  if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN || 
+      dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE || 
       dlgtype == WEBVIEW_DIALOG_TYPE_SAVE) {
     IFileDialog *dlg = NULL;
     IShellItem *res = NULL;
     WCHAR *ws = NULL;
     char *s = NULL;
     FILEOPENDIALOGOPTIONS opts, add_opts;
-    if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN) {
+    if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN || dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE) {
       if (CoCreateInstance(
               iid_unref(&CLSID_FileOpenDialog), NULL, CLSCTX_INPROC_SERVER,
               iid_unref(&IID_IFileOpenDialog), (void **)&dlg) != S_OK) {
@@ -1492,6 +1516,11 @@ WEBVIEW_API void webview_dialog(struct webview *w,
                   FOS_PATHMUSTEXIST | FOS_FILEMUSTEXIST | FOS_SHAREAWARE |
                   FOS_NOTESTFILECREATE | FOS_NODEREFERENCELINKS |
                   FOS_FORCESHOWHIDDEN | FOS_DEFAULTNOMINIMODE;
+
+      if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE) {
+        add_opts |= FOS_ALLOWMULTISELECT;
+      }
+                  
     } else {
       if (CoCreateInstance(
               iid_unref(&CLSID_FileSaveDialog), NULL, CLSCTX_INPROC_SERVER,
@@ -1514,18 +1543,64 @@ WEBVIEW_API void webview_dialog(struct webview *w,
     if (dlg->lpVtbl->Show(dlg, w->priv.hwnd) != S_OK) {
       goto error_dlg;
     }
-    if (dlg->lpVtbl->GetResult(dlg, &res) != S_OK) {
-      goto error_dlg;
+
+    if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE) {
+      IShellItemArray *resMulti = NULL;
+      DWORD dw, count; 
+
+      if (dlg->lpVtbl->GetResults(dlg, &resMulti) != S_OK) {
+        goto error_dlg;
+      }
+
+      if (resMulti->lpVtbl->GetCount(resMulti, &count) != S_OK) {
+        goto error_dlg;
+      }
+
+      IShellItem *itemI;
+      WCHAR *wstr = NULL;
+      char *wcstr = NULL;
+      char tmp[2048] = {0};
+      for(dw = 0; dw < count; ++dw) {
+        if(resMulti->lpVtbl->GetItemAt(resMulti,dw,&itemI) != S_OK) {
+          break;
+        }
+
+        if (itemI->lpVtbl->GetDisplayName(itemI, SIGDN_FILESYSPATH, &wstr) == S_OK) {
+          wcstr = webview_from_utf16(wstr);
+          if (dw > 0) {
+            sprintf(tmp, "%s|%s", tmp, wcstr);
+          } else {
+            strcat(tmp, wcstr);
+          }
+        } else {
+          break;
+        }
+        
+      }
+      itemI->lpVtbl->Release(itemI);
+
+      strncpy(result, tmp, resultsz);
+      result[resultsz - 1] = '\0';
+      CoTaskMemFree(wstr);
+
+      error_resMulti:
+        resMulti->lpVtbl->Release(resMulti);
+    } else {
+      if (dlg->lpVtbl->GetResult(dlg, &res) != S_OK) {
+        goto error_dlg;
+      }
+      if (res->lpVtbl->GetDisplayName(res, SIGDN_FILESYSPATH, &ws) != S_OK) {
+        goto error_result;
+      }
+      s = webview_from_utf16(ws);
+      strncpy(result, s, resultsz);
+      result[resultsz - 1] = '\0';
+      CoTaskMemFree(ws);
+      
+      error_result:
+        res->lpVtbl->Release(res);
     }
-    if (res->lpVtbl->GetDisplayName(res, SIGDN_FILESYSPATH, &ws) != S_OK) {
-      goto error_result;
-    }
-    s = webview_from_utf16(ws);
-    strncpy(result, s, resultsz);
-    result[resultsz - 1] = '\0';
-    CoTaskMemFree(ws);
-  error_result:
-    res->lpVtbl->Release(res);
+ 
   error_dlg:
     dlg->lpVtbl->Release(dlg);
     return;
@@ -1766,10 +1841,25 @@ WEBVIEW_API void webview_dialog(struct webview *w,
                                 enum webview_dialog_type dlgtype, int flags,
                                 const char *title, const char *arg,
                                 char *result, size_t resultsz) {
-  if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN ||
-      dlgtype == WEBVIEW_DIALOG_TYPE_SAVE) {
-    NSSavePanel *panel;
-    if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN) {
+
+    if (dlgtype == WEBVIEW_DIALOG_TYPE_SAVE) {                            
+      NSSavePanel *panel;
+    
+      panel = [NSSavePanel savePanel];  
+    [panel setCanCreateDirectories:YES];
+    [panel setShowsHiddenFiles:YES];
+    [panel setExtensionHidden:NO];
+    [panel setCanSelectHiddenExtension:NO];
+    [panel setTreatsFilePackagesAsDirectories:YES];
+    [panel beginSheetModalForWindow:w->priv.window
+                  completionHandler:^(NSInteger result) {
+                    [NSApp stopModalWithCode:result];
+                  }]; 
+    if ([NSApp runModalForWindow:panel] == NSModalResponseOK) {
+    }
+    
+    } else if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN || dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE)  {
+     
       NSOpenPanel *openPanel = [NSOpenPanel openPanel];
       if (flags & WEBVIEW_DIALOG_FLAG_DIRECTORY) {
         [openPanel setCanChooseFiles:NO];
@@ -1779,23 +1869,37 @@ WEBVIEW_API void webview_dialog(struct webview *w,
         [openPanel setCanChooseDirectories:NO];
       }
       [openPanel setResolvesAliases:NO];
-      [openPanel setAllowsMultipleSelection:NO];
-      panel = openPanel;
-    } else {
-      panel = [NSSavePanel savePanel];
-    }
-    [panel setCanCreateDirectories:YES];
-    [panel setShowsHiddenFiles:YES];
-    [panel setExtensionHidden:NO];
-    [panel setCanSelectHiddenExtension:NO];
-    [panel setTreatsFilePackagesAsDirectories:YES];
-    [panel beginSheetModalForWindow:w->priv.window
+
+      if (dlgtype == WEBVIEW_DIALOG_TYPE_OPEN_MULTIPLE) {
+        [openPanel setAllowsMultipleSelection:YES];
+      } else {
+        [openPanel setAllowsMultipleSelection:NO];
+        
+      } 
+      
+    [openPanel setCanCreateDirectories:YES];
+    [openPanel setShowsHiddenFiles:YES];
+    [openPanel setExtensionHidden:NO];
+    [openPanel setCanSelectHiddenExtension:NO];
+    [openPanel setTreatsFilePackagesAsDirectories:YES];
+    [openPanel beginSheetModalForWindow:w->priv.window
                   completionHandler:^(NSInteger result) {
                     [NSApp stopModalWithCode:result];
                   }];
-    if ([NSApp runModalForWindow:panel] == NSModalResponseOK) {
-      const char *filename = [[[panel URL] path] UTF8String];
-      strlcpy(result, filename, resultsz);
+    if ([NSApp runModalForWindow:openPanel] == NSModalResponseOK) {
+      NSMutableString *full = [NSMutableString string]; 
+      NSString* separator = [NSString stringWithUTF8String:"|"];
+      
+      for (int i=0;i<[[openPanel URLs] count];i++) {
+        NSString* str = [NSString stringWithUTF8String:[[[[openPanel URLs] objectAtIndex:i] path] UTF8String]];
+        if (i>0) {
+        [full appendString:separator];
+        }
+        [full appendString:str];
+      }
+
+      const char * temp2 = [full UTF8String];
+      strlcpy(result, temp2, resultsz);  
     }
   } else if (dlgtype == WEBVIEW_DIALOG_TYPE_ALERT) {
     NSAlert *a = [NSAlert new];

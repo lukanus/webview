@@ -238,6 +238,8 @@ const (
 	DialogTypeSave
 	// DialogTypeAlert is a system alert dialog (message box)
 	DialogTypeAlert
+	// DialogTypeOpenMultiple
+	DialogTypeOpenMultiple
 )
 
 const (
